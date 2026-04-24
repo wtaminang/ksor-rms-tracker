@@ -2,22 +2,47 @@ import io
 import pandas as pd
 import streamlit as st
 
+# --------------------------------------------------
+# PAGE SETUP
+# --------------------------------------------------
 st.set_page_config(page_title="KSOR RMS Tracker", layout="wide")
 
+# --------------------------------------------------
+# SIMPLE PASSWORD GATE
+# --------------------------------------------------
+APP_PASSWORD = "ChangeThisPassword123"
+
 st.title("KSOR RMS Tracker")
-st.caption("Version 4 — interactive management dashboard with filters, KPIs, backlog, completion rate, and time-to-completion")
+
+password = st.text_input("Enter app password", type="password")
+
+if password != APP_PASSWORD:
+    st.warning("Please enter the correct password to access the dashboard.")
+    st.stop()
+
+# --------------------------------------------------
+# APP HEADER
+# --------------------------------------------------
+st.caption(
+    "Version 5 — internal dashboard with filters, KPIs, backlog, completion rate, and time-to-completion"
+)
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
 
 if uploaded_file is not None:
     df = pd.read_excel(uploaded_file)
 
+    # --------------------------------------------------
+    # CLEAN COLUMN NAMES
+    # --------------------------------------------------
     df.columns = [
         col.strip().lower().replace(" ", "_").replace("/", "_")
         for col in df.columns
     ]
 
-    # Columns from your Excel
+    # --------------------------------------------------
+    # EXPECTED COLUMNS
+    # --------------------------------------------------
     client_id_col = "client_id"
     name_col = "name"
     dob_col = "birth_date"
@@ -41,19 +66,27 @@ if uploaded_file is not None:
 
     if missing:
         st.error(f"Missing required columns: {missing}")
+        st.write("Detected columns:")
+        st.write(list(df.columns))
         st.stop()
 
-    # Convert dates
+    # --------------------------------------------------
+    # DATE CLEANING
+    # --------------------------------------------------
     for col in [dob_col, requested_date_col, scheduled_date_col, invoice_date_col]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # Clinic field
+    # --------------------------------------------------
+    # CLINIC FIELD
+    # --------------------------------------------------
     if clinic_col in df.columns:
         df["clinic"] = df[clinic_col].fillna(df[org_col])
     else:
         df["clinic"] = df[org_col]
 
-    # Client key
+    # --------------------------------------------------
+    # CLIENT KEY
+    # --------------------------------------------------
     df["client_key"] = df[client_id_col].astype(str).str.strip()
 
     missing_id = df["client_key"].isin(["", "nan", "None"])
@@ -63,18 +96,34 @@ if uploaded_file is not None:
         + df.loc[missing_id, dob_col].astype(str)
     )
 
-    # Completion logic
+    # --------------------------------------------------
+    # COMPLETION LOGIC
+    # Invoice Date filled = Completed
+    # Invoice Date blank = Pending
+    # --------------------------------------------------
     df["completed"] = df[invoice_date_col].notna()
     df["status"] = df["completed"].apply(lambda x: "Completed" if x else "Pending")
 
-    # Reporting date
+    # --------------------------------------------------
+    # REPORTING DATE
+    # Completed: Invoice Date
+    # Pending: Scheduled Date, then Requested Date
+    # --------------------------------------------------
     df["reporting_date"] = df[invoice_date_col]
     df["reporting_date"] = df["reporting_date"].fillna(df[scheduled_date_col])
     df["reporting_date"] = df["reporting_date"].fillna(df[requested_date_col])
 
-    # Fiscal year
+    # --------------------------------------------------
+    # FISCAL YEAR, MONTH, WEEK, TRIMESTER
+    # FY runs Oct 1 to Sep 30
+    # T1 = Oct-Dec, T2 = Jan-Mar, T3 = Apr-Jun, T4 = Jul-Sep
+    # --------------------------------------------------
     df["fiscal_year"] = df["reporting_date"].apply(
-        lambda x: x.year + 1 if pd.notna(x) and x.month >= 10 else x.year if pd.notna(x) else None
+        lambda x: x.year + 1
+        if pd.notna(x) and x.month >= 10
+        else x.year
+        if pd.notna(x)
+        else None
     )
 
     df["month"] = df["reporting_date"].dt.to_period("M").astype(str)
@@ -89,19 +138,21 @@ if uploaded_file is not None:
     def get_trimester(date):
         if pd.isna(date):
             return None
-        m = date.month
-        if m in [10, 11, 12]:
+        month = date.month
+        if month in [10, 11, 12]:
             return "T1"
-        elif m in [1, 2, 3]:
+        elif month in [1, 2, 3]:
             return "T2"
-        elif m in [4, 5, 6]:
+        elif month in [4, 5, 6]:
             return "T3"
         else:
             return "T4"
 
     df["trimester"] = df["reporting_date"].apply(get_trimester)
 
-    # Time-to-completion
+    # --------------------------------------------------
+    # TIME-TO-COMPLETION METRICS
+    # --------------------------------------------------
     df["days_requested_to_invoice"] = (
         df[invoice_date_col] - df[requested_date_col]
     ).dt.days
@@ -110,14 +161,18 @@ if uploaded_file is not None:
         df[invoice_date_col] - df[scheduled_date_col]
     ).dt.days
 
-    # Unique client table
+    # --------------------------------------------------
+    # UNIQUE CLIENT TABLE
+    # --------------------------------------------------
     unique_clients = (
         df.sort_values(by=["client_key", "reporting_date"])
         .drop_duplicates(subset=["client_key"], keep="last")
         .copy()
     )
 
-    # Sidebar filters
+    # --------------------------------------------------
+    # SIDEBAR FILTERS
+    # --------------------------------------------------
     st.sidebar.header("Filters")
 
     available_fys = sorted(unique_clients["fiscal_year"].dropna().unique())
@@ -132,21 +187,21 @@ if uploaded_file is not None:
     selected_clinics = st.sidebar.multiselect(
         "Clinic",
         clinics,
-        default=clinics
+        default=clinics,
     )
 
     statuses = ["Completed", "Pending"]
     selected_statuses = st.sidebar.multiselect(
         "Status",
         statuses,
-        default=statuses
+        default=statuses,
     )
 
     trimesters = ["T1", "T2", "T3", "T4"]
     selected_trimesters = st.sidebar.multiselect(
         "Trimester",
         trimesters,
-        default=trimesters
+        default=trimesters,
     )
 
     filtered = unique_clients[
@@ -156,6 +211,9 @@ if uploaded_file is not None:
         & (unique_clients["trimester"].isin(selected_trimesters))
     ].copy()
 
+    # --------------------------------------------------
+    # EXECUTIVE SNAPSHOT
+    # --------------------------------------------------
     st.subheader(f"FY{int(selected_fy)} Executive Snapshot")
 
     total_clients = filtered["client_key"].nunique()
@@ -165,18 +223,21 @@ if uploaded_file is not None:
     avg_days_completion = filtered["days_requested_to_invoice"].mean()
 
     col1, col2, col3, col4, col5 = st.columns(5)
+
     col1.metric("Unique Clients", total_clients)
     col2.metric("Completed", completed_clients)
     col3.metric("Pending", pending_clients)
     col4.metric("Completion Rate", f"{completion_rate:.1%}")
     col5.metric(
         "Avg Days to Completion",
-        "N/A" if pd.isna(avg_days_completion) else f"{avg_days_completion:.1f}"
+        "N/A" if pd.isna(avg_days_completion) else f"{avg_days_completion:.1f}",
     )
 
     st.divider()
 
-    # Clinic summary
+    # --------------------------------------------------
+    # CLINIC SUMMARY
+    # --------------------------------------------------
     st.subheader("Clinic Performance Summary")
 
     clinic_summary = (
@@ -198,12 +259,14 @@ if uploaded_file is not None:
         lambda row: "High Pending / Low Completion"
         if row["completion_rate"] < 0.70 or row["pending"] >= 10
         else "OK",
-        axis=1
+        axis=1,
     )
 
     st.dataframe(clinic_summary, use_container_width=True)
 
-    # Alerts
+    # --------------------------------------------------
+    # AUTOMATIC ALERTS
+    # --------------------------------------------------
     st.subheader("Automatic Alerts")
 
     alert_df = clinic_summary[clinic_summary["risk_flag"] != "OK"]
@@ -214,14 +277,17 @@ if uploaded_file is not None:
         st.warning("Some clinics may need follow-up.")
         st.dataframe(alert_df, use_container_width=True)
 
-    # Pending backlog
+    # --------------------------------------------------
+    # PENDING BACKLOG
+    # --------------------------------------------------
     st.subheader("Pending Backlog")
 
     pending_backlog = filtered[filtered["status"] == "Pending"].copy()
 
-    pending_backlog["days_pending"] = (
-        pd.Timestamp.today().normalize() - pending_backlog["reporting_date"]
-    ).dt.days
+    if not pending_backlog.empty:
+        pending_backlog["days_pending"] = (
+            pd.Timestamp.today().normalize() - pending_backlog["reporting_date"]
+        ).dt.days
 
     pending_display_cols = [
         client_id_col,
@@ -234,14 +300,18 @@ if uploaded_file is not None:
         "status",
     ]
 
-    pending_display_cols = [col for col in pending_display_cols if col in pending_backlog.columns]
+    pending_display_cols = [
+        col for col in pending_display_cols if col in pending_backlog.columns
+    ]
 
     st.dataframe(
         pending_backlog[pending_display_cols],
-        use_container_width=True
+        use_container_width=True,
     )
 
-    # Monthly summary
+    # --------------------------------------------------
+    # MONTHLY SUMMARY
+    # --------------------------------------------------
     st.subheader("Monthly Summary")
 
     monthly = (
@@ -261,7 +331,9 @@ if uploaded_file is not None:
 
     st.dataframe(monthly, use_container_width=True)
 
-    # Weekly summary
+    # --------------------------------------------------
+    # WEEKLY SUMMARY
+    # --------------------------------------------------
     st.subheader("Weekly Summary")
 
     weekly = (
@@ -280,7 +352,9 @@ if uploaded_file is not None:
 
     st.dataframe(weekly, use_container_width=True)
 
-    # Trimester summary
+    # --------------------------------------------------
+    # TRIMESTER SUMMARY
+    # --------------------------------------------------
     st.subheader("Trimester Summary")
 
     trimester = (
@@ -299,7 +373,9 @@ if uploaded_file is not None:
 
     st.dataframe(trimester, use_container_width=True)
 
-    # Charts
+    # --------------------------------------------------
+    # VISUAL DASHBOARD
+    # --------------------------------------------------
     st.subheader("Visual Dashboard")
 
     if not monthly.empty:
@@ -309,7 +385,7 @@ if uploaded_file is not None:
             columns="clinic",
             values="unique_clients",
             aggfunc="sum",
-            fill_value=0
+            fill_value=0,
         )
         st.line_chart(monthly_chart)
 
@@ -325,7 +401,7 @@ if uploaded_file is not None:
             columns="clinic",
             values="unique_clients",
             aggfunc="sum",
-            fill_value=0
+            fill_value=0,
         )
         st.bar_chart(trimester_chart)
 
@@ -334,8 +410,11 @@ if uploaded_file is not None:
         completion_rate_chart = clinic_summary.set_index("clinic")["completion_rate"]
         st.bar_chart(completion_rate_chart)
 
-    # Export
+    # --------------------------------------------------
+    # EXPORT RESULTS
+    # --------------------------------------------------
     output = io.BytesIO()
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Cleaned_Data")
         unique_clients.to_excel(writer, index=False, sheet_name="Unique_Clients")
@@ -349,6 +428,9 @@ if uploaded_file is not None:
     st.download_button(
         label="Download Results Workbook",
         data=output.getvalue(),
-        file_name="ksor_rms_tracker_v4_output.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_name="ksor_rms_tracker_v5_output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+else:
+    st.info("Upload your KSOR Excel file to begin.")
