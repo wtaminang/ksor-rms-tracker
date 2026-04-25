@@ -2,14 +2,8 @@ import io
 import pandas as pd
 import streamlit as st
 
-# --------------------------------------------------
-# PAGE SETUP
-# --------------------------------------------------
 st.set_page_config(page_title="KSOR RMS Tracker", layout="wide")
 
-# --------------------------------------------------
-# SIMPLE PASSWORD GATE
-# --------------------------------------------------
 APP_PASSWORD = "ChangeThisPassword123"
 
 st.title("KSOR RMS Tracker")
@@ -20,29 +14,18 @@ if password != APP_PASSWORD:
     st.warning("Please enter the correct password to access the dashboard.")
     st.stop()
 
-# --------------------------------------------------
-# APP HEADER
-# --------------------------------------------------
-st.caption(
-    "Version 5 — internal dashboard with filters, KPIs, backlog, completion rate, and time-to-completion"
-)
+st.caption("Version 6 — backlog aging, smarter reports, overdue flags, and executive exports")
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
 
 if uploaded_file is not None:
     df = pd.read_excel(uploaded_file)
 
-    # --------------------------------------------------
-    # CLEAN COLUMN NAMES
-    # --------------------------------------------------
     df.columns = [
         col.strip().lower().replace(" ", "_").replace("/", "_")
         for col in df.columns
     ]
 
-    # --------------------------------------------------
-    # EXPECTED COLUMNS
-    # --------------------------------------------------
     client_id_col = "client_id"
     name_col = "name"
     dob_col = "birth_date"
@@ -70,23 +53,14 @@ if uploaded_file is not None:
         st.write(list(df.columns))
         st.stop()
 
-    # --------------------------------------------------
-    # DATE CLEANING
-    # --------------------------------------------------
     for col in [dob_col, requested_date_col, scheduled_date_col, invoice_date_col]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # --------------------------------------------------
-    # CLINIC FIELD
-    # --------------------------------------------------
     if clinic_col in df.columns:
         df["clinic"] = df[clinic_col].fillna(df[org_col])
     else:
         df["clinic"] = df[org_col]
 
-    # --------------------------------------------------
-    # CLIENT KEY
-    # --------------------------------------------------
     df["client_key"] = df[client_id_col].astype(str).str.strip()
 
     missing_id = df["client_key"].isin(["", "nan", "None"])
@@ -96,28 +70,13 @@ if uploaded_file is not None:
         + df.loc[missing_id, dob_col].astype(str)
     )
 
-    # --------------------------------------------------
-    # COMPLETION LOGIC
-    # Invoice Date filled = Completed
-    # Invoice Date blank = Pending
-    # --------------------------------------------------
     df["completed"] = df[invoice_date_col].notna()
     df["status"] = df["completed"].apply(lambda x: "Completed" if x else "Pending")
 
-    # --------------------------------------------------
-    # REPORTING DATE
-    # Completed: Invoice Date
-    # Pending: Scheduled Date, then Requested Date
-    # --------------------------------------------------
     df["reporting_date"] = df[invoice_date_col]
     df["reporting_date"] = df["reporting_date"].fillna(df[scheduled_date_col])
     df["reporting_date"] = df["reporting_date"].fillna(df[requested_date_col])
 
-    # --------------------------------------------------
-    # FISCAL YEAR, MONTH, WEEK, TRIMESTER
-    # FY runs Oct 1 to Sep 30
-    # T1 = Oct-Dec, T2 = Jan-Mar, T3 = Apr-Jun, T4 = Jul-Sep
-    # --------------------------------------------------
     df["fiscal_year"] = df["reporting_date"].apply(
         lambda x: x.year + 1
         if pd.notna(x) and x.month >= 10
@@ -150,9 +109,6 @@ if uploaded_file is not None:
 
     df["trimester"] = df["reporting_date"].apply(get_trimester)
 
-    # --------------------------------------------------
-    # TIME-TO-COMPLETION METRICS
-    # --------------------------------------------------
     df["days_requested_to_invoice"] = (
         df[invoice_date_col] - df[requested_date_col]
     ).dt.days
@@ -161,18 +117,38 @@ if uploaded_file is not None:
         df[invoice_date_col] - df[scheduled_date_col]
     ).dt.days
 
-    # --------------------------------------------------
-    # UNIQUE CLIENT TABLE
-    # --------------------------------------------------
     unique_clients = (
         df.sort_values(by=["client_key", "reporting_date"])
         .drop_duplicates(subset=["client_key"], keep="last")
         .copy()
     )
 
-    # --------------------------------------------------
-    # SIDEBAR FILTERS
-    # --------------------------------------------------
+    today = pd.Timestamp.today().normalize()
+
+    unique_clients["days_pending"] = None
+    pending_mask = unique_clients["status"] == "Pending"
+    unique_clients.loc[pending_mask, "days_pending"] = (
+        today - unique_clients.loc[pending_mask, "reporting_date"]
+    ).dt.days
+
+    def backlog_bucket(days):
+        if pd.isna(days):
+            return "Completed"
+        if days <= 30:
+            return "0-30 days"
+        elif days <= 60:
+            return "31-60 days"
+        elif days <= 90:
+            return "61-90 days"
+        else:
+            return "90+ days"
+
+    unique_clients["backlog_age_bucket"] = unique_clients["days_pending"].apply(backlog_bucket)
+
+    unique_clients["overdue_flag"] = unique_clients["days_pending"].apply(
+        lambda x: "Overdue 60+ days" if pd.notna(x) and x > 60 else "OK"
+    )
+
     st.sidebar.header("Filters")
 
     available_fys = sorted(unique_clients["fiscal_year"].dropna().unique())
@@ -184,25 +160,13 @@ if uploaded_file is not None:
     selected_fy = st.sidebar.selectbox("Fiscal Year", available_fys)
 
     clinics = sorted(unique_clients["clinic"].dropna().unique())
-    selected_clinics = st.sidebar.multiselect(
-        "Clinic",
-        clinics,
-        default=clinics,
-    )
+    selected_clinics = st.sidebar.multiselect("Clinic", clinics, default=clinics)
 
     statuses = ["Completed", "Pending"]
-    selected_statuses = st.sidebar.multiselect(
-        "Status",
-        statuses,
-        default=statuses,
-    )
+    selected_statuses = st.sidebar.multiselect("Status", statuses, default=statuses)
 
     trimesters = ["T1", "T2", "T3", "T4"]
-    selected_trimesters = st.sidebar.multiselect(
-        "Trimester",
-        trimesters,
-        default=trimesters,
-    )
+    selected_trimesters = st.sidebar.multiselect("Trimester", trimesters, default=trimesters)
 
     filtered = unique_clients[
         (unique_clients["fiscal_year"] == selected_fy)
@@ -211,33 +175,29 @@ if uploaded_file is not None:
         & (unique_clients["trimester"].isin(selected_trimesters))
     ].copy()
 
-    # --------------------------------------------------
-    # EXECUTIVE SNAPSHOT
-    # --------------------------------------------------
     st.subheader(f"FY{int(selected_fy)} Executive Snapshot")
 
     total_clients = filtered["client_key"].nunique()
     completed_clients = filtered[filtered["completed"]]["client_key"].nunique()
     pending_clients = filtered[~filtered["completed"]]["client_key"].nunique()
+    overdue_clients = filtered[filtered["overdue_flag"] == "Overdue 60+ days"]["client_key"].nunique()
     completion_rate = completed_clients / total_clients if total_clients else 0
     avg_days_completion = filtered["days_requested_to_invoice"].mean()
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
 
     col1.metric("Unique Clients", total_clients)
     col2.metric("Completed", completed_clients)
     col3.metric("Pending", pending_clients)
-    col4.metric("Completion Rate", f"{completion_rate:.1%}")
-    col5.metric(
+    col4.metric("Overdue 60+ Days", overdue_clients)
+    col5.metric("Completion Rate", f"{completion_rate:.1%}")
+    col6.metric(
         "Avg Days to Completion",
         "N/A" if pd.isna(avg_days_completion) else f"{avg_days_completion:.1f}",
     )
 
     st.divider()
 
-    # --------------------------------------------------
-    # CLINIC SUMMARY
-    # --------------------------------------------------
     st.subheader("Clinic Performance Summary")
 
     clinic_summary = (
@@ -246,6 +206,7 @@ if uploaded_file is not None:
             unique_clients=("client_key", "nunique"),
             completed=("completed", "sum"),
             pending=("completed", lambda x: (~x).sum()),
+            overdue_60_plus=("overdue_flag", lambda x: (x == "Overdue 60+ days").sum()),
             avg_days_to_completion=("days_requested_to_invoice", "mean"),
         )
         .reset_index()
@@ -256,17 +217,14 @@ if uploaded_file is not None:
     ).fillna(0)
 
     clinic_summary["risk_flag"] = clinic_summary.apply(
-        lambda row: "High Pending / Low Completion"
-        if row["completion_rate"] < 0.70 or row["pending"] >= 10
+        lambda row: "High Risk"
+        if row["completion_rate"] < 0.70 or row["overdue_60_plus"] > 0
         else "OK",
         axis=1,
     )
 
     st.dataframe(clinic_summary, use_container_width=True)
 
-    # --------------------------------------------------
-    # AUTOMATIC ALERTS
-    # --------------------------------------------------
     st.subheader("Automatic Alerts")
 
     alert_df = clinic_summary[clinic_summary["risk_flag"] != "OK"]
@@ -277,17 +235,30 @@ if uploaded_file is not None:
         st.warning("Some clinics may need follow-up.")
         st.dataframe(alert_df, use_container_width=True)
 
-    # --------------------------------------------------
-    # PENDING BACKLOG
-    # --------------------------------------------------
-    st.subheader("Pending Backlog")
+    st.subheader("Backlog Aging Summary")
+
+    backlog_summary = (
+        filtered[filtered["status"] == "Pending"]
+        .groupby(["clinic", "backlog_age_bucket"])
+        .agg(pending_clients=("client_key", "nunique"))
+        .reset_index()
+    )
+
+    st.dataframe(backlog_summary, use_container_width=True)
+
+    if not backlog_summary.empty:
+        backlog_chart = backlog_summary.pivot_table(
+            index="clinic",
+            columns="backlog_age_bucket",
+            values="pending_clients",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        st.bar_chart(backlog_chart)
+
+    st.subheader("Pending Backlog Detail")
 
     pending_backlog = filtered[filtered["status"] == "Pending"].copy()
-
-    if not pending_backlog.empty:
-        pending_backlog["days_pending"] = (
-            pd.Timestamp.today().normalize() - pending_backlog["reporting_date"]
-        ).dt.days
 
     pending_display_cols = [
         client_id_col,
@@ -297,6 +268,8 @@ if uploaded_file is not None:
         scheduled_date_col,
         "reporting_date",
         "days_pending",
+        "backlog_age_bucket",
+        "overdue_flag",
         "status",
     ]
 
@@ -304,14 +277,17 @@ if uploaded_file is not None:
         col for col in pending_display_cols if col in pending_backlog.columns
     ]
 
+    st.dataframe(pending_backlog[pending_display_cols], use_container_width=True)
+
+    st.subheader("Overdue 60+ Days Detail")
+
+    overdue_detail = filtered[filtered["overdue_flag"] == "Overdue 60+ days"].copy()
+
     st.dataframe(
-        pending_backlog[pending_display_cols],
+        overdue_detail[pending_display_cols],
         use_container_width=True,
     )
 
-    # --------------------------------------------------
-    # MONTHLY SUMMARY
-    # --------------------------------------------------
     st.subheader("Monthly Summary")
 
     monthly = (
@@ -320,6 +296,7 @@ if uploaded_file is not None:
             unique_clients=("client_key", "nunique"),
             completed=("completed", "sum"),
             pending=("completed", lambda x: (~x).sum()),
+            overdue_60_plus=("overdue_flag", lambda x: (x == "Overdue 60+ days").sum()),
             avg_days_to_completion=("days_requested_to_invoice", "mean"),
         )
         .reset_index()
@@ -331,9 +308,6 @@ if uploaded_file is not None:
 
     st.dataframe(monthly, use_container_width=True)
 
-    # --------------------------------------------------
-    # WEEKLY SUMMARY
-    # --------------------------------------------------
     st.subheader("Weekly Summary")
 
     weekly = (
@@ -342,6 +316,7 @@ if uploaded_file is not None:
             unique_clients=("client_key", "nunique"),
             completed=("completed", "sum"),
             pending=("completed", lambda x: (~x).sum()),
+            overdue_60_plus=("overdue_flag", lambda x: (x == "Overdue 60+ days").sum()),
         )
         .reset_index()
     )
@@ -352,9 +327,6 @@ if uploaded_file is not None:
 
     st.dataframe(weekly, use_container_width=True)
 
-    # --------------------------------------------------
-    # TRIMESTER SUMMARY
-    # --------------------------------------------------
     st.subheader("Trimester Summary")
 
     trimester = (
@@ -363,6 +335,7 @@ if uploaded_file is not None:
             unique_clients=("client_key", "nunique"),
             completed=("completed", "sum"),
             pending=("completed", lambda x: (~x).sum()),
+            overdue_60_plus=("overdue_flag", lambda x: (x == "Overdue 60+ days").sum()),
         )
         .reset_index()
     )
@@ -373,9 +346,49 @@ if uploaded_file is not None:
 
     st.dataframe(trimester, use_container_width=True)
 
-    # --------------------------------------------------
-    # VISUAL DASHBOARD
-    # --------------------------------------------------
+    st.subheader("Executive Report")
+
+    top_clinic = (
+        clinic_summary.sort_values("unique_clients", ascending=False)["clinic"].iloc[0]
+        if not clinic_summary.empty
+        else "N/A"
+    )
+
+    lowest_completion_clinic = (
+        clinic_summary.sort_values("completion_rate", ascending=True)["clinic"].iloc[0]
+        if not clinic_summary.empty
+        else "N/A"
+    )
+
+    executive_report = pd.DataFrame(
+        {
+            "metric": [
+                "Fiscal Year",
+                "Total Unique Clients",
+                "Completed",
+                "Pending",
+                "Overdue 60+ Days",
+                "Completion Rate",
+                "Average Days to Completion",
+                "Highest Volume Clinic",
+                "Lowest Completion Rate Clinic",
+            ],
+            "value": [
+                f"FY{int(selected_fy)}",
+                total_clients,
+                completed_clients,
+                pending_clients,
+                overdue_clients,
+                f"{completion_rate:.1%}",
+                "N/A" if pd.isna(avg_days_completion) else round(avg_days_completion, 1),
+                top_clinic,
+                lowest_completion_clinic,
+            ],
+        }
+    )
+
+    st.dataframe(executive_report, use_container_width=True)
+
     st.subheader("Visual Dashboard")
 
     if not monthly.empty:
@@ -394,41 +407,34 @@ if uploaded_file is not None:
         clinic_chart = clinic_summary.set_index("clinic")[["completed", "pending"]]
         st.bar_chart(clinic_chart)
 
-    if not trimester.empty:
-        st.markdown("### Trimester Unique Clients by Clinic")
-        trimester_chart = trimester.pivot_table(
-            index="trimester",
-            columns="clinic",
-            values="unique_clients",
-            aggfunc="sum",
-            fill_value=0,
-        )
-        st.bar_chart(trimester_chart)
+    if not backlog_summary.empty:
+        st.markdown("### Backlog Aging by Clinic")
+        st.bar_chart(backlog_chart)
 
     if not clinic_summary.empty:
         st.markdown("### Completion Rate by Clinic")
         completion_rate_chart = clinic_summary.set_index("clinic")["completion_rate"]
         st.bar_chart(completion_rate_chart)
 
-    # --------------------------------------------------
-    # EXPORT RESULTS
-    # --------------------------------------------------
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Cleaned_Data")
         unique_clients.to_excel(writer, index=False, sheet_name="Unique_Clients")
         filtered.to_excel(writer, index=False, sheet_name="Filtered_View")
+        executive_report.to_excel(writer, index=False, sheet_name="Executive_Report")
         clinic_summary.to_excel(writer, index=False, sheet_name="Clinic_Summary")
+        backlog_summary.to_excel(writer, index=False, sheet_name="Backlog_Summary")
         pending_backlog.to_excel(writer, index=False, sheet_name="Pending_Backlog")
+        overdue_detail.to_excel(writer, index=False, sheet_name="Overdue_60Plus")
         monthly.to_excel(writer, index=False, sheet_name="Monthly")
         weekly.to_excel(writer, index=False, sheet_name="Weekly")
         trimester.to_excel(writer, index=False, sheet_name="Trimester")
 
     st.download_button(
-        label="Download Results Workbook",
+        label="Download Smart Reports Workbook",
         data=output.getvalue(),
-        file_name="ksor_rms_tracker_v5_output.xlsx",
+        file_name="ksor_rms_tracker_v6_smart_reports.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
